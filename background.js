@@ -1,143 +1,169 @@
-// background.js
+const GROUP_TITLE = "YouTube Tabs";
+const GROUP_COLOR = "green";
 
-// Хранилище
-let lastActiveTabId = null;
+// Хранилище состояний свернутости групп, чтобы отличать клик пользователя от системных обновлений
+let groupCollapseState = {};
 
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    if (request.action === 'OPEN_BACKGROUND_TAB') {
-        handleOpenBackground(request.url, sender.tab);
-    } else if (request.action === 'VIDEO_ENDED') {
-        handleVideoEnded(sender.tab);
-    }
-});
+// === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
 
-async function handleOpenBackground(url, senderTab) {
+async function ensureInGroup(tabId) {
     try {
-        // 1. Создаем вкладку (сразу привязываем к родителю через openerTabId)
-        const newTab = await chrome.tabs.create({ 
-            url: url, 
-            active: false,
-            openerTabId: senderTab.id 
-        });
+        const tab = await chrome.tabs.get(tabId);
+        if (tab.groupId !== -1) return;
 
-        // 2. Логика группировки
-        const senderGroupId = senderTab.groupId;
-        let targetGroupId = senderGroupId;
-
-        if (senderGroupId === -1) {
-            // Если родитель не в группе, создаем новую
-            targetGroupId = await chrome.tabs.group({
-                tabIds: [senderTab.id, newTab.id]
-            });
+        const groups = await chrome.tabGroups.query({ title: GROUP_TITLE });
+        
+        if (groups.length > 0) {
+            await chrome.tabs.group({ groupId: groups[0].id, tabIds: tabId });
         } else {
-            // Добавляем новую в существующую
-            await chrome.tabs.group({
-                groupId: senderGroupId,
-                tabIds: [newTab.id]
-            });
+            const gid = await chrome.tabs.group({ tabIds: tabId });
+            // При создании группы запоминаем её состояние
+            const group = await chrome.tabGroups.get(gid);
+            groupCollapseState[gid] = group.collapsed;
+            
+            await chrome.tabGroups.update(gid, { title: GROUP_TITLE, color: GROUP_COLOR });
         }
-
-        // 3. Красим и именуем группу (всегда, чтобы гарантировать свойства)
-        await chrome.tabGroups.update(targetGroupId, { 
-            title: "YouTube Tabs", 
-            color: "green" 
-        });
-
     } catch (e) {
-        console.error("BG: Error creating/grouping tab", e);
+        console.error("Group error:", e);
     }
 }
 
-chrome.tabs.onActivated.addListener(async (activeInfo) => {
-    const tabId = activeInfo.tabId;
-    lastActiveTabId = tabId;
+// === УПРАВЛЕНИЕ ВОСПРОИЗВЕДЕНИЕМ И СОРТИРОВКОЙ ===
 
+async function syncPlayback(activeTabId) {
     try {
-        const tab = await chrome.tabs.get(tabId);
+        const activeTab = await chrome.tabs.get(activeTabId);
         
-        if (tab.url && tab.url.includes("youtube.com/watch")) {
-            
-            // 1. Перемещение в конец (работает внутри группы автоматически)
-            try {
-                // index: -1 перемещает в конец списка. 
-                // Если вкладка в группе, она встанет в конец СВОЕЙ группы.
-                await chrome.tabs.move(tabId, { index: -1 });
-            } catch (err) {
-                // Игнорируем, если вкладка одна или уже в конце
-            }
+        if (!activeTab || !activeTab.url || !activeTab.url.includes("youtube.com/watch")) return;
 
-            // 2. Управление воспроизведением
-            const ytTabs = await chrome.tabs.query({ url: "*://www.youtube.com/*" });
-            
-            // Всем паузу
-            for (const t of ytTabs) {
-                if (t.id !== tabId) {
-                    chrome.tabs.sendMessage(t.id, { action: "PAUSE_VIDEO" }).catch(() => {});
-                }
+        // 1. ПЕРЕМЕЩЕНИЕ В КОНЕЦ
+        try {
+            await chrome.tabs.move(activeTabId, { index: -1 });
+        } catch (e) {}
+
+        // 2. ГАРАНТИЯ ГРУППЫ
+        await ensureInGroup(activeTabId);
+
+        // 3. УПРАВЛЕНИЕ ПЛЕЕРАМИ
+        const tabs = await chrome.tabs.query({ url: "*://www.youtube.com/*" });
+        
+        for (const tab of tabs) {
+            if (tab.id === activeTabId) {
+                chrome.tabs.sendMessage(tab.id, { action: "syncPlayAndSpeed" }).catch(() => {});
+            } else {
+                chrome.tabs.sendMessage(tab.id, { action: "pauseVideo" }).catch(() => {});
             }
-            // Текущей плей
-            chrome.tabs.sendMessage(tabId, { action: "ACTIVATE_AND_PLAY" }).catch(() => {});
         }
     } catch (e) {
-        console.error("BG: Activation logic error", e);
+        // Игнорируем ошибки доступа
     }
-});
+}
+
+// === ЛОГИКА ЗАВЕРШЕНИЯ ВИДЕО (AUTO-NEXT) ===
 
 async function handleVideoEnded(senderTab) {
     if (!senderTab) return;
-
     try {
         const allTabs = await chrome.tabs.query({ currentWindow: true });
         const currentIndex = allTabs.findIndex(t => t.id === senderTab.id);
         
-        // Логика "предпоследняя вкладка" (index - 1)
+        // Идем на предыдущую (т.к. текущая в конце списка)
         let targetIndex = currentIndex - 1;
-        
-        // Если закрываем самую первую (редкий кейс), берем следующую
         if (targetIndex < 0 && allTabs.length > 1) {
-             targetIndex = currentIndex + 1;
+            targetIndex = currentIndex + 1;
         }
 
         if (targetIndex >= 0 && targetIndex < allTabs.length) {
             const targetTab = allTabs[targetIndex];
-            
-            // 1. Активируем
             await chrome.tabs.update(targetTab.id, { active: true });
-            
-            // 2. Запускаем (страховка)
-            setTimeout(() => {
-                 chrome.tabs.sendMessage(targetTab.id, { action: "ACTIVATE_AND_PLAY" }).catch(() => {});
-            }, 300);
-
-            // 3. Закрываем старую
             await chrome.tabs.remove(senderTab.id);
         }
-    } catch (e) {
-        console.error("BG: Auto-next error", e);
-    }
+    } catch (e) {}
 }
 
-// Агрессивная защита и активация по клику на группу
-if (chrome.tabGroups) {
-    chrome.tabGroups.onUpdated.addListener(async (group) => {
-        // Если группа свернулась (пользователь кликнул на заголовок)
+
+// === СЛУШАТЕЛИ СОБЫТИЙ ===
+
+// 1. Активация вкладки
+chrome.tabs.onActivated.addListener((info) => {
+    setTimeout(() => syncPlayback(info.tabId), 200);
+});
+
+// 2. Обновление вкладки
+chrome.tabs.onUpdated.addListener((tabId, change, tab) => {
+    if (change.status === 'complete' && tab.active && tab.url?.includes("youtube.com/watch")) {
+        syncPlayback(tabId);
+    }
+});
+
+// 3. Сообщения
+chrome.runtime.onMessage.addListener((msg, sender) => {
+    if (!sender.tab) return;
+
+    if (msg.action === 'OPEN_BACKGROUND_TAB') {
+        chrome.tabs.create({ 
+            url: msg.url, 
+            active: false, 
+            openerTabId: sender.tab.id 
+        }, async (newTab) => {
+            const parentGroupId = sender.tab.groupId;
+            
+            if (parentGroupId !== -1) {
+                // Если родитель УЖЕ в группе - просто добавляем новую туда
+                await chrome.tabs.group({ groupId: parentGroupId, tabIds: newTab.id });
+            } else {
+                // === ИЗМЕНЕНИЕ ЗДЕСЬ ===
+                // Если родитель БЕЗ группы - создаем группу для РОДИТЕЛЯ и НОВОЙ вкладки
+                const newGroupId = await chrome.tabs.group({ tabIds: [sender.tab.id, newTab.id] });
+                
+                // Фиксируем состояние в кэше, чтобы Smart Group Click не дергался
+                const group = await chrome.tabGroups.get(newGroupId);
+                groupCollapseState[newGroupId] = group.collapsed;
+                
+                // Красим и именуем
+                await chrome.tabGroups.update(newGroupId, { title: GROUP_TITLE, color: GROUP_COLOR });
+            }
+        });
+    }
+
+    if (msg.action === 'VIDEO_ENDED') {
+        handleVideoEnded(sender.tab);
+    }
+});
+
+// 4. SMART GROUP CLICK
+chrome.tabGroups.onUpdated.addListener(async (group) => {
+    if (group.title !== GROUP_TITLE) return;
+
+    // Проверка на изменение состояния (отсекаем системные апдейты)
+    if (groupCollapseState[group.id] === group.collapsed) {
+        return; 
+    }
+    
+    groupCollapseState[group.id] = group.collapsed;
+
+    const tabs = await chrome.tabs.query({ groupId: group.id });
+    if (tabs.length === 0) return;
+
+    const playingTab = tabs.find(t => t.audible);
+
+    if (playingTab) {
+        // Сценарий А: Есть звук
         if (group.collapsed) {
-            try {
-                const tabsInGroup = await chrome.tabs.query({ groupId: group.id });
-                
-                // Ищем вкладку, которая звучит (audible) или была последней активной
-                // Примечание: audible надежнее для видео.
-                const playingTab = tabsInGroup.find(t => t.audible);
-                
-                if (playingTab) {
-                    // 1. Разворачиваем группу обратно
-                    await chrome.tabGroups.update(group.id, { collapsed: false });
-                    // 2. Активируем играющую вкладку
-                    await chrome.tabs.update(playingTab.id, { active: true });
-                }
-            } catch (e) {
-                console.error("BG: Group logic error", e);
+            await chrome.tabGroups.update(group.id, { collapsed: false });
+        }
+        if (!playingTab.active) {
+            await chrome.tabs.update(playingTab.id, { active: true });
+        }
+    } else {
+        // Сценарий Б: Тишина
+        if (!group.collapsed) {
+            // Если фокус не внутри группы - активируем последнюю
+            const isAnyActiveInGroup = tabs.some(t => t.active);
+            if (!isAnyActiveInGroup) {
+                const lastTab = tabs[tabs.length - 1];
+                await chrome.tabs.update(lastTab.id, { active: true });
             }
         }
-    });
-}
+    }
+});

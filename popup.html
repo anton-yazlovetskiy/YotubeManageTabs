@@ -1,20 +1,20 @@
-
 <!DOCTYPE html>
 <html>
 <head>
+  <meta charset="UTF-8">
   <style>
-    body { width: 200px; padding: 10px; font-family: sans-serif; background: #202020; color: white; }
-    .controls { display: flex; justify-content: space-between; align-items: center; }
-    button { background: #3ea6ff; border: none; color: white; width: 40px; height: 40px; font-size: 20px; border-radius: 5px; cursor: pointer; }
-    button:active { background: #26547c; }
-    #speed-val { font-size: 18px; font-weight: bold; }
+    body { width: 160px; font-family: sans-serif; padding: 10px; text-align: center; background: #181818; color: white; }
+    .btn { width: 32px; height: 32px; cursor: pointer; background: #cc0000; color: white; border: none; border-radius: 50%; font-size: 20px; }
+    .speed-controls { display: flex; align-items: center; justify-content: center; gap: 10px; margin-top: 10px; }
+    #speedValue { font-weight: bold; width: 60px; font-size: 16px; }
   </style>
 </head>
 <body>
-  <div class="controls">
-    <button id="dec">-</button>
-    <span id="speed-val">1.00</span>
-    <button id="inc">+</button>
+  <div>Global Start Speed</div>
+  <div class="speed-controls">
+    <button id="minus" class="btn">−</button>
+    <span id="speedValue">1.50x</span>
+    <button id="plus" class="btn">+</button>
   </div>
   <script src="popup.js"></script>
 </body>
