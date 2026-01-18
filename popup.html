@@ -3,19 +3,35 @@
 <head>
   <meta charset="UTF-8">
   <style>
-    body { width: 160px; font-family: sans-serif; padding: 10px; text-align: center; background: #181818; color: white; }
-    .btn { width: 32px; height: 32px; cursor: pointer; background: #cc0000; color: white; border: none; border-radius: 50%; font-size: 20px; }
-    .speed-controls { display: flex; align-items: center; justify-content: center; gap: 10px; margin-top: 10px; }
-    #speedValue { font-weight: bold; width: 60px; font-size: 16px; }
+    body { width: 180px; font-family: sans-serif; padding: 10px; text-align: center; background: #181818; color: white; }
+    .btn { width: 32px; height: 32px; cursor: pointer; background: #333; color: white; border: 1px solid #555; border-radius: 5px; font-size: 18px; transition: 0.2s; }
+    .btn:hover { background: #444; }
+    .btn:active { background: #666; }
+    
+    .speed-controls { display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 10px; }
+    #speedValue { font-weight: bold; width: 50px; font-size: 16px; }
+    
+    /* Кнопка сброса */
+    .reset-container { margin-top: 15px; border-top: 1px solid #333; padding-top: 10px; }
+    #resetBtn { width: 100%; background: #cc0000; border: none; font-weight: bold; color: white; border-radius: 4px; padding: 5px; cursor: pointer; }
+    #resetBtn:hover { background: #ff0000; }
   </style>
 </head>
 <body>
-  <div>Global Start Speed</div>
+  <div style="font-size: 12px; color: #aaa;">Global Speed</div>
+  
   <div class="speed-controls">
     <button id="minus" class="btn">−</button>
-    <span id="speedValue">1.50x</span>
+    <span id="speedValue">...</span>
     <button id="plus" class="btn">+</button>
   </div>
+
+  <div class="reset-container">
+    <button id="resetBtn" title="Сбросить на глобальную скорость">
+      ⟳ Reset Video
+    </button>
+  </div>
+
   <script src="popup.js"></script>
 </body>
 </html>
