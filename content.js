@@ -1,5 +1,4 @@
-// === 1. ВНЕДРЕНИЕ СТИЛЕЙ (AGRESSIVE NEON) ===
-// Используем outline, так как box-shadow часто обрезается youtube-ом (overflow: hidden)
+// === 1. ВНЕДРЕНИЕ СТИЛЕЙ (Neon) ===
 const styleEl = document.createElement('style');
 styleEl.textContent = `
     .yt-ext-neon {
@@ -9,102 +8,116 @@ styleEl.textContent = `
         transition: all 0.1s ease-in-out !important;
         z-index: 9999 !important;
     }
-    /* Дополнительно подсвечиваем прогресс-бар, если он есть, чтобы видно было наверняка */
-    .yt-ext-neon #progress {
-        background: #0f0 !important;
-    }
+    .yt-ext-neon #progress { background: #0f0 !important; }
 `;
 (document.documentElement || document.head).appendChild(styleEl);
 
 
 // === 2. STATE & STORAGE ===
 const STATE = {
-    speed: 1.5,
-    clickedIds: new Set() // Используем Set для мгновенного доступа O(1)
+    globalSpeed: 1.5,      // Значение из настроек расширения
+    manualSpeed: null,     // Значение для ТЕКУЩЕГО видео (установленное вручную)
+    clickedIds: new Set(),
+    currentVideoId: null,  // ID текущего видео (для SPA)
+    isProgrammaticChange: false // Флаг: "это мы меняем скорость?"
 };
 
-// Восстановление истории (синхронно, сразу при старте)
+// Восстановление истории просмотров
 try {
     const saved = localStorage.getItem('yt_history_ids');
     if (saved) {
-        const parsed = JSON.parse(saved);
-        parsed.forEach(id => STATE.clickedIds.add(id));
+        JSON.parse(saved).forEach(id => STATE.clickedIds.add(id));
     }
 } catch(e) {}
 
 
-// === 3. СКОРОСТЬ ===
+// === 3. СКОРОСТЬ (АГРЕССИВНАЯ ЗАЩИТА) ===
 
-function loadSpeed() {
+function loadGlobalSpeed() {
     chrome.storage.local.get(['preferredSpeed'], (res) => {
         let val = parseFloat(res.preferredSpeed);
-        if (!val || val === 1.0) {
+        // Дефолт 1.5 только если совсем пусто
+        if (!val && val !== 0) {
             val = 1.5;
             chrome.storage.local.set({ preferredSpeed: '1.5' });
         }
-        STATE.speed = val;
+        STATE.globalSpeed = val;
         applySpeed();
     });
 }
-loadSpeed();
+loadGlobalSpeed();
 
+// Слушаем изменения глобальных настроек
 chrome.storage.onChanged.addListener((changes) => {
     if (changes.preferredSpeed) {
-        STATE.speed = parseFloat(changes.preferredSpeed.newValue);
-        applySpeed();
-        showToast(`Скорость: ${STATE.speed.toFixed(2)}x`);
+        STATE.globalSpeed = parseFloat(changes.preferredSpeed.newValue);
+        // Если меняем через настройки - это считается ручной установкой
+        updateManualSpeed(STATE.globalSpeed);
+        showToast(`Скорость: ${STATE.globalSpeed.toFixed(2)}x`);
     }
 });
 
+// Получить сохраненную скорость для конкретного видео
+function restoreManualSpeed(vid) {
+    const saved = sessionStorage.getItem(`yt_speed_${vid}`);
+    return saved ? parseFloat(saved) : null;
+}
+
+// Обновить ручную скорость (и сохранить)
+function updateManualSpeed(val) {
+    STATE.manualSpeed = val;
+    STATE.isProgrammaticChange = true; // Поднимаем флаг перед применением
+    applySpeed();
+    
+    // Сохраняем в сессию
+    const vid = getVideoId(location.href);
+    if (vid) {
+        sessionStorage.setItem(`yt_speed_${vid}`, val);
+    }
+}
+
+// ГЛАВНАЯ ФУНКЦИЯ ПРИМЕНЕНИЯ
 function applySpeed() {
     const video = document.querySelector('video');
-    if (video && Math.abs(video.playbackRate - STATE.speed) > 0.05) {
-        video.playbackRate = STATE.speed;
+    if (!video) return;
+
+    // Приоритет: Ручная для этого видео > Глобальная
+    const targetSpeed = STATE.manualSpeed !== null ? STATE.manualSpeed : STATE.globalSpeed;
+
+    // Применяем, только если есть различие (защита от бесконечных триггеров)
+    if (Math.abs(video.playbackRate - targetSpeed) > 0.05) {
+        STATE.isProgrammaticChange = true; // Это МЫ меняем
+        video.playbackRate = targetSpeed;
+        
+        // Сбрасываем флаг через мгновение (ratechange асинхронен)
+        setTimeout(() => { STATE.isProgrammaticChange = false; }, 200);
     }
 }
 
 
-// === 4. ПОДСВЕТКА (ВЕЧНЫЙ ЦИКЛ 60FPS) ===
+// === 4. ПОДСВЕТКА И TOOLS ===
 
-// Надежный парсер ID из любой ссылки
 function getVideoId(url) {
     if (!url) return null;
-    // Регулярка ловит: v=ID, shorts/ID, youtu.be/ID
     const match = url.match(/(?:v=|shorts\/|youtu\.be\/)([\w-]{11})/);
     return match ? match[1] : null;
 }
 
 function highlightLoop() {
-    // Селектор берет и обычные видео, и шортсы, и результаты поиска
     const links = document.querySelectorAll('a#thumbnail, a.ytd-thumbnail');
-    
     for (let i = 0; i < links.length; i++) {
         const link = links[i];
-        const href = link.href;
-        
-        // Оптимизация: если нет href, пропускаем
-        if (!href) continue;
-
-        const vid = getVideoId(href);
+        if (!link.href) continue;
+        const vid = getVideoId(link.href);
 
         if (vid && STATE.clickedIds.has(vid)) {
-            // Проверка класса быстрее, чем его добавление
-            if (!link.classList.contains('yt-ext-neon')) {
-                link.classList.add('yt-ext-neon');
-            }
+            if (!link.classList.contains('yt-ext-neon')) link.classList.add('yt-ext-neon');
         } else {
-            // Если видео НЕ в списке, но класс есть (ютуб подменил контент) -> убираем
-            if (link.classList.contains('yt-ext-neon')) {
-                link.classList.remove('yt-ext-neon');
-            }
+            if (link.classList.contains('yt-ext-neon')) link.classList.remove('yt-ext-neon');
         }
     }
-    
-    // Бесконечный цикл без таймеров, синхронно с рендером браузера
     requestAnimationFrame(highlightLoop);
 }
-
-// Запускаем цикл подсветки
 highlightLoop();
 
 
@@ -115,8 +128,6 @@ window.addEventListener('click', (e) => {
     if (!link) return;
 
     const vid = getVideoId(link.href);
-    
-    // Условия: Есть ID + это ссылка на просмотр (или главная, чтобы ловить клики по тумбам)
     const isTarget = vid && (link.href.includes('/watch') || link.href.includes('/shorts/') || location.pathname === '/' || location.pathname.includes('/feed'));
 
     if (isTarget) {
@@ -124,34 +135,24 @@ window.addEventListener('click', (e) => {
         e.stopPropagation();
         e.stopImmediatePropagation();
 
-        // 1. Сохраняем (в Set и в LocalStorage)
         STATE.clickedIds.add(vid);
-        
-        // Лимит истории (превращаем в массив, режем, возвращаем в Set)
         if (STATE.clickedIds.size > 500) {
             const arr = Array.from(STATE.clickedIds);
             STATE.clickedIds = new Set(arr.slice(arr.length - 500));
         }
         localStorage.setItem('yt_history_ids', JSON.stringify(Array.from(STATE.clickedIds)));
 
-        // 2. Мгновенно красим нажатый элемент (не ждем цикла)
         link.classList.add('yt-ext-neon');
-
-        // 3. Открываем
-        chrome.runtime.sendMessage({ 
-            action: 'OPEN_BACKGROUND_TAB', 
-            url: link.href 
-        });
+        chrome.runtime.sendMessage({ action: 'OPEN_BACKGROUND_TAB', url: link.href });
 
         return false;
     }
 }, true);
 
 
-// === 6. TOAST (SHADOW DOM) ===
+// === 6. TOAST ===
 
 let toastRoot = null;
-
 function showToast(text) {
     if (!toastRoot) {
         const host = document.createElement('div');
@@ -169,7 +170,6 @@ function showToast(text) {
         box-shadow: 0 4px 15px rgba(0,0,0,0.5); opacity: 0; transition: opacity 0.2s;
     `;
     toastRoot.appendChild(div);
-    
     requestAnimationFrame(() => div.style.opacity = '1');
     setTimeout(() => {
         div.style.opacity = '0';
@@ -178,28 +178,68 @@ function showToast(text) {
 }
 
 
-// === 7. СЛУШАТЕЛИ ФОНА И ВИДЕО ===
+// === 7. ТАЙМЕРЫ И СЛУШАТЕЛИ ===
 
+// Проверка SPA и навешивание листенеров
 setInterval(() => {
-    applySpeed();
-    
+    // 1. Проверка смены видео (SPA)
+    const currentVid = getVideoId(location.href);
+    if (currentVid && currentVid !== STATE.currentVideoId) {
+        STATE.currentVideoId = currentVid;
+        // Восстанавливаем сохраненную скорость для ЭТОГО видео или сбрасываем в null
+        STATE.manualSpeed = restoreManualSpeed(currentVid);
+        applySpeed();
+    }
+
     const v = document.querySelector('video');
-    if (v && !v.dataset.endListener) {
-        v.dataset.endListener = "true";
-        v.addEventListener('ended', () => {
-            if (!location.search.includes('list=')) {
-                chrome.runtime.sendMessage({ action: 'VIDEO_ENDED' });
-            }
-        });
+    if (v) {
+        // 2. Листенер окончания
+        if (!v.dataset.endListener) {
+            v.dataset.endListener = "true";
+            v.addEventListener('ended', () => {
+                if (!location.search.includes('list=')) {
+                    chrome.runtime.sendMessage({ action: 'VIDEO_ENDED' });
+                }
+            });
+        }
+
+        // 3. Листенер изменения скорости (RATECHANGE)
+        // Логика: если скорость изменилась "извне" (ютуб или юзер через плеер)
+        if (!v.dataset.rateListener) {
+            v.dataset.rateListener = "true";
+            v.addEventListener('ratechange', () => {
+                // Если это сделали МЫ (applySpeed) - игнорируем
+                if (STATE.isProgrammaticChange) return;
+
+                const newRate = v.playbackRate;
+                
+                // === АГРЕССИВНАЯ ЗАЩИТА ОТ СБРОСА ===
+                // Если скорость стала 1.0, НО у нас была установлена другая ручная скорость (напр. 2.0)
+                // Значит это Ютуб сбросил её (реклама, баг, простой).
+                // МЫ ОТКАТЫВАЕМ ЭТО ИЗМЕНЕНИЕ.
+                if (Math.abs(newRate - 1.0) < 0.01 && STATE.manualSpeed !== null && Math.abs(STATE.manualSpeed - 1.0) > 0.01) {
+                    // console.log('YouTube reset detected. Reverting to:', STATE.manualSpeed);
+                    applySpeed(); // Форсируем обратно наше значение
+                    return;
+                }
+
+                // В любом другом случае (юзер поставил 1.25, 1.5 и т.д.) - запоминаем как новую норму
+                updateManualSpeed(newRate);
+            });
+        }
+        
+        // 4. Мягкая проверка раз в полсекунды (на случай, если event не сработал)
+        applySpeed();
     }
 }, 500);
 
+// Обработка сообщений
 chrome.runtime.onMessage.addListener((msg) => {
     const video = document.querySelector('video');
     
     if (msg.action === 'syncPlayAndSpeed') {
         if (video) {
-            applySpeed();
+            applySpeed(); // Проверит сохраненную или глобальную и выставит
             if (video.paused) video.play().catch(() => {});
         }
     } 
@@ -207,9 +247,9 @@ chrome.runtime.onMessage.addListener((msg) => {
         if (video && !video.paused) video.pause();
     }
     else if (msg.action === 'forceUpdateSpeed') {
-        STATE.speed = msg.newSpeed;
-        applySpeed();
-        showToast(`Скорость: ${STATE.speed.toFixed(2)}x`);
+        // Изменение из Popup всегда приоритетно
+        updateManualSpeed(msg.newSpeed);
+        showToast(`Скорость: ${msg.newSpeed.toFixed(2)}x`);
     }
 });
 
@@ -218,15 +258,16 @@ window.addEventListener('keydown', (e) => {
     if (e.shiftKey && (e.key === '.' || e.key === '>' || e.key === ',' || e.key === '<')) {
         e.preventDefault(); e.stopPropagation();
         
+        // База: текущая ручная или глобальная
+        const base = STATE.manualSpeed !== null ? STATE.manualSpeed : STATE.globalSpeed;
+        
         let delta = (e.key === '.' || e.key === '>') ? 0.25 : -0.25;
-        let newVal = STATE.speed + delta;
+        let newVal = base + delta;
         if (newVal < 0.25) newVal = 0.25;
         if (newVal > 3.0) newVal = 3.0;
         
-        STATE.speed = newVal;
-        chrome.storage.local.set({ preferredSpeed: newVal.toString() });
-        
-        applySpeed();
+        // Хоткеи считаются ручной установкой
+        updateManualSpeed(newVal);
         showToast(`Скорость: ${newVal.toFixed(2)}x`);
     }
 }, true);
