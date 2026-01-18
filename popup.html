@@ -1,0 +1,21 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body { width: 200px; padding: 10px; font-family: sans-serif; background: #202020; color: white; }
+    .controls { display: flex; justify-content: space-between; align-items: center; }
+    button { background: #3ea6ff; border: none; color: white; width: 40px; height: 40px; font-size: 20px; border-radius: 5px; cursor: pointer; }
+    button:active { background: #26547c; }
+    #speed-val { font-size: 18px; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <div class="controls">
+    <button id="dec">-</button>
+    <span id="speed-val">1.00</span>
+    <button id="inc">+</button>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>
