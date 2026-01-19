@@ -8,7 +8,7 @@ const GROUP_COLOR = "green";
 
 let tabGroupsMap = {};
 
-// === 1. FOCUS GUARD (ЗАЩИТНИК ФОКУСА) ===
+// === 1. FOCUS GUARD (ЗАЩИТНИК ФОКУСА)
 // Срабатывает при закрытии вкладки
 chrome.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
     const knownGroupId = tabGroupsMap[tabId];
@@ -16,19 +16,34 @@ chrome.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
 
     if (removeInfo.isWindowClosing) return;
 
-    if (knownGroupId) {
+    if (knownGroupId && knownGroupId !== -1) {
         try {
+            // 1. Проверяем, остались ли вкладки в группе
             const tabsInGroup = await chrome.tabs.query({ groupId: knownGroupId });
+            
             if (tabsInGroup.length > 0) {
-                // Берем последнюю вкладку
-                const targetTab = tabsInGroup[tabsInGroup.length - 1];
+                // ИНТЕГРАЦИЯ v5.4: Проверка текущего фокуса
+                // Получаем текущую активную вкладку в этом окне
+                const currentTab = await chrome.tabs.query({ active: true, currentWindow: true });
                 
-                // 1. АКТИВИРУЕМ
-                await chrome.tabs.update(targetTab.id, { active: true });
-                
-                // 2. БУДИМ (HAMMER METHOD)
-                // Шлем сигналы, даже если браузер в фоне
-                forceResume(targetTab.id);
+                // ЛОГИКА: Если активная вкладка "вылетела" из нашей группы (или её нет),
+                // ТОЛЬКО ТОГДА мы вмешиваемся и возвращаем фокус.
+                if (!currentTab[0] || currentTab[0].groupId !== knownGroupId) {
+                    
+                    // Берем последнюю вкладку (как самую свежую)
+                    const targetTab = tabsInGroup[tabsInGroup.length - 1];
+                    
+                    // АКТИВИРУЕМ
+                    await chrome.tabs.update(targetTab.id, { active: true });
+                    
+                    // БУДИМ (HAMMER METHOD из v7.2)
+                    // Вызываем только если пришлось принудительно переключать
+                    if (typeof forceResume === 'function') {
+                        forceResume(targetTab.id);
+                    }
+                } 
+                // ELSE: Если фокус уже на вкладке нашей группы (Chrome сам переключил),
+                // мы ничего не делаем, чтобы не сбивать нативный процесс.
             }
         } catch (e) { console.error("Focus Guard error:", e); }
     }
@@ -89,7 +104,11 @@ function forceResume(tabId) {
 chrome.tabs.onActivated.addListener(async (activeInfo) => {
     try {
         const tab = await chrome.tabs.get(activeInfo.tabId);
-        if (!tab.url || !tab.url.includes("youtube.com/watch")) return;
+        if (!tab.url || !tab.url.includes("youtube.com/watch")) {
+            // ВАЖНО: Отправляем команду на возобновление воспроизведения
+            chrome.tabs.sendMessage(tab.id, { action: "RESUME_PLAYBACK" }).catch(()=>{});
+            return;
+        };
 
         // A. RESUME
         forceResume(tab.id);

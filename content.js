@@ -112,8 +112,13 @@ function initVideoHandler() {
                 return;
             }
             
-            // Если обычное видео - закрываем
-            chrome.runtime.sendMessage({ action: "VIDEO_ENDED" });
+            // 1. Проигрываем звук
+            playCompletionSound();
+            
+            // 2. Закрываем вкладку с небольшой задержкой (чтобы звук прозвучал)
+            setTimeout(() => {
+                chrome.runtime.sendMessage({ action: "VIDEO_ENDED" });
+            }, 700);
         });
     }
 }
@@ -208,6 +213,36 @@ function setupClickTrap() {
             chrome.runtime.sendMessage({ action: "OPEN_BACKGROUND", url: link.href });
         }
     }, true);
+}
+
+// Функция для создания приятного "динь" (две ноты)
+function playCompletionSound() {
+    try {
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        
+        const playNote = (freq, startTime, duration) => {
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(freq, startTime);
+            
+            gain.gain.setValueAtTime(0.1, startTime);
+            gain.gain.exponentialRampToValueAtTime(0.0001, startTime + duration);
+            
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            
+            osc.start(startTime);
+            osc.stop(startTime + duration);
+        };
+
+        // Две гармоничные ноты (Ми и Ля)
+        playNote(659.25, audioCtx.currentTime, 0.5); 
+        playNote(880.00, audioCtx.currentTime + 0.1, 0.4);
+    } catch (e) {
+        console.error("Audio playback failed:", e);
+    }
 }
 
 // === 7. INIT ===
