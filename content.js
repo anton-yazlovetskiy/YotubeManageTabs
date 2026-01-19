@@ -1,297 +1,234 @@
-// === 1. ВИЗУАЛ (Стили) ===
-const styleEl = document.createElement('style');
-styleEl.textContent = `
-    /* Подсветка (Neon) */
-    .yt-ext-neon {
-        outline: 4px solid #0f0 !important;
-        outline-offset: -4px !important;
-        box-shadow: inset 0 0 20px rgba(0, 255, 0, 0.7) !important;
-        transition: all 0.1s ease-in-out !important;
-        z-index: 9999 !important;
-        border-radius: 12px !important;
-        display: block !important;
-    }
-    
-    /* Уведомление (Toast) - ТЗ: 16px, снизу по центру */
-    #yt-speed-toast {
-        position: fixed;
-        bottom: 15%; /* Чуть выше прогрессбара */
-        left: 50%;
-        transform: translateX(-50%);
-        background: rgba(0, 0, 0, 0.8);
-        color: #fff;
-        padding: 12px 24px;
-        border-radius: 8px;
-        font-family: Roboto, Arial, sans-serif;
-        font-size: 16px; 
-        font-weight: bold;
-        z-index: 2147483647; /* Max Int */
-        pointer-events: none;
-        opacity: 0;
-        transition: opacity 0.2s ease-out;
-        box-shadow: 0 4px 15px rgba(0,0,0,0.5);
-        border: 1px solid rgba(255,255,255,0.1);
-        text-align: center;
-        text-shadow: 0 1px 2px black;
-    }
-`;
-(document.documentElement || document.head).appendChild(styleEl);
+/**
+ * YouTube Aggressive Manager - Content Script
+ * Версия: 7.1 (Reset Support)
+ */
 
+const CONFIG = {
+    minSpeed: 0.25,
+    maxSpeed: 3.0,
+    step: 0.25,
+    debounceTime: 500
+};
 
-// === 2. ХЕЛПЕРЫ ===
+let CACHE = {
+    globalSpeed: 1.5,
+    globalVolume: 100,
+    seenVideos: new Set(),
+    observerTimeout: null
+};
 
-function getVideoId(url) {
-    if (!url) return null;
-    const match = url.match(/(?:v=|shorts\/|youtu\.be\/)([\w-]{11})/);
-    return match ? match[1] : null;
+// === 1. STYLES ===
+function injectStyles() {
+    const old = document.getElementById('yt-manager-styles');
+    if (old) old.remove();
+
+    const css = `
+        .yt-ext-neon {
+            box-shadow: 0 0 5px #0f0, 0 0 10px #0f0, 0 0 20px #0f0 !important;
+            border: 1px solid rgba(0, 255, 0, 0.8) !important;
+            transition: all 0.3s ease-in-out !important;
+            border-radius: 6px !important;
+            z-index: 10;
+            position: relative;
+        }
+        #yt-speed-toast {
+            position: fixed;
+            bottom: 120px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.85);
+            color: #0f0;
+            padding: 12px 30px;
+            border-radius: 50px;
+            font-family: 'Roboto', sans-serif;
+            font-size: 24px; 
+            font-weight: 900;
+            text-shadow: 0 0 10px #0f0;
+            border: 2px solid #0f0;
+            box-shadow: 0 0 20px rgba(0, 255, 0, 0.4);
+            z-index: 2147483647;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.2s ease-out;
+        }
+    `;
+    const styleEl = document.createElement('style');
+    styleEl.id = 'yt-manager-styles';
+    styleEl.textContent = css;
+    (document.documentElement || document.head).appendChild(styleEl);
 }
 
-let toastTimer;
+// === 2. UI UTILS ===
 function showToast(text) {
     let toast = document.getElementById('yt-speed-toast');
     if (!toast) {
         toast = document.createElement('div');
         toast.id = 'yt-speed-toast';
-        (document.documentElement || document.body).appendChild(toast);
+        (document.body || document.documentElement).appendChild(toast);
     }
-
     toast.textContent = text;
-    toast.style.transition = 'none'; 
-    toast.style.opacity = '1';
-    
-    if (toastTimer) clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => {
-        toast.style.transition = 'opacity 0.5s ease-out';
-        toast.style.opacity = '0';
-    }, 2000);
+    requestAnimationFrame(() => toast.style.opacity = '1');
+    if (toast.hideTimeout) clearTimeout(toast.hideTimeout);
+    toast.hideTimeout = setTimeout(() => toast.style.opacity = '0', 1500);
 }
 
+function getVideoId(url) {
+    try { return new URL(url).searchParams.get('v'); } catch (e) { return null; }
+}
 
-// === 3. ЛОГИКА СКОРОСТИ ===
-
-let CACHE = {
-    global: 1.5,
-    // Используем Map для хранения ручных настроек в рамках сессии вкладки,
-    // чтобы при навигации "Назад/Вперед" настройки сохранялись корректно.
-    manualSpeeds: new Map() 
-};
-
-// Загрузка глобальной скорости
-chrome.storage.local.get(['preferredSpeed'], (res) => {
-    let val = parseFloat(res.preferredSpeed);
-    if (!val) { val = 1.5; chrome.storage.local.set({ preferredSpeed: '1.5' }); }
-    CACHE.global = val;
-});
-
-function applySpeed(targetSpeed = null) {
+// === 3. MEDIA CONTROLLER ===
+function applyMediaSettings(targetSpeed = null) {
     const video = document.querySelector('video');
     if (!video) return;
 
-    // 1. Определяем какую скорость ставить
-    let finalSpeed;
-    const vid = getVideoId(location.href);
-
+    // Speed
     if (targetSpeed !== null) {
-        // Явная команда (хоткей или попап)
-        finalSpeed = targetSpeed;
-    } else {
-        // Автоматический выбор: Если есть ручная для этого видео -> берем её, иначе Глобальная
-        if (vid && CACHE.manualSpeeds.has(vid)) {
-            finalSpeed = CACHE.manualSpeeds.get(vid);
-        } else {
-            finalSpeed = CACHE.global;
-        }
+        video.playbackRate = targetSpeed;
+        showToast(`${targetSpeed.toFixed(2)}x`);
+    } else if (Math.abs(video.playbackRate - CACHE.globalSpeed) > 0.1) {
+        video.playbackRate = CACHE.globalSpeed;
     }
 
-    // 2. Применяем
-    if (Math.abs(video.playbackRate - finalSpeed) > 0.05) {
-        video.playbackRate = finalSpeed;
+    // Volume
+    const targetVol = CACHE.globalVolume / 100;
+    if (Math.abs(video.volume - targetVol) > 0.05) {
+        video.volume = targetVol;
     }
 }
 
+function initVideoHandler() {
+    const video = document.querySelector('video');
+    if (video && !video.dataset.ytExtInitialized) {
+        video.dataset.ytExtInitialized = "true";
+        video.addEventListener('loadedmetadata', () => applyMediaSettings());
+        applyMediaSettings();
+        video.addEventListener('ended', () => {
+            chrome.runtime.sendMessage({ action: "VIDEO_ENDED" });
+        });
+    }
+}
 
-// === 4. ПЕРЕХВАТ КЛАВИАТУРЫ (ВАЖНО: Capture Phase) ===
-// Мы слушаем события на window с флагом true. Это значит, мы ловим их ПЕРВЫМИ.
-
-window.addEventListener('keydown', (e) => {
-    // Shift + > (.) или Shift + < (,)
-    if (e.shiftKey && (e.key === '.' || e.key === '>' || e.key === ',' || e.key === '<')) {
-        
-        // 1. БЛОКИРУЕМ YouTube
-        e.preventDefault();
-        e.stopPropagation();
-        e.stopImmediatePropagation(); // Самое важное: не дать сработать другим скриптам
-
+// === 4. MESSAGING ===
+chrome.runtime.onMessage.addListener((msg) => {
+    if (msg.action === 'updateGlobalConfig') {
+        CACHE.globalSpeed = msg.newSpeed;
+        applyMediaSettings();
+        showToast(`Speed: ${msg.newSpeed}x`);
+    }
+    if (msg.action === 'updateGlobalVolume') {
+        CACHE.globalVolume = msg.newVolume;
+        applyMediaSettings();
+    }
+    // RESTORED RESET
+    if (msg.action === 'resetToGlobal') {
+        CACHE.globalSpeed = msg.speed; // Обновляем локальный кэш
         const video = document.querySelector('video');
-        if (!video) return;
-
-        // 2. Логика изменения
-        // Берем текущую скорость видео как базу (чтобы изменение было интуитивным)
-        let current = video.playbackRate;
-        let delta = (e.key === '.' || e.key === '>') ? 0.25 : -0.25;
-        let next = current + delta;
-
-        // 3. Лимиты (0.25 - 3.0)
-        if (next < 0.25) next = 0.25;
-        if (next > 3.0) next = 3.0;
-
-        // 4. Сохраняем как ручную настройку для ЭТОГО видео
-        const vid = getVideoId(location.href);
-        if (vid) {
-            CACHE.manualSpeeds.set(vid, next);
+        if (video) {
+            video.playbackRate = msg.speed;
+            showToast(`Reset: ${msg.speed}x`);
         }
-
-        // 5. Применяем и уведомляем
-        applySpeed(next);
-        showToast(`${next.toFixed(2)}x`);
     }
-}, true); // <--- TRUE (Capture)
-
-
-// === 5. ПЕРЕХВАТ КЛИКОВ (ГЛАВНАЯ И ФИДЫ) ===
-
-window.addEventListener('click', (e) => {
-    const link = e.target.closest('a');
-    if (!link) return;
-
-    const vid = getVideoId(link.href);
-    // Ловим клики везде: watch, shorts, feed, результаты поиска
-    const isTarget = vid && (
-        link.href.includes('/watch') || 
-        link.href.includes('/shorts/') || 
-        location.pathname === '/' || 
-        location.pathname.includes('/feed') || 
-        location.pathname.includes('/results')
-    );
-
-    if (isTarget) {
-        e.preventDefault();
-        e.stopPropagation();
-        e.stopImmediatePropagation();
-
-        // История (localStorage)
-        let history = new Set();
-        try {
-            const s = localStorage.getItem('yt_history_ids');
-            if (s) history = new Set(JSON.parse(s));
-        } catch(e){}
-        history.add(vid);
-        
-        if (history.size > 500) { // Чистка
-            const arr = Array.from(history);
-            history = new Set(arr.slice(arr.length - 500));
-        }
-        localStorage.setItem('yt_history_ids', JSON.stringify(Array.from(history)));
-
-        // Визуал
-        link.classList.add('yt-ext-neon');
-        
-        // Открытие
-        chrome.runtime.sendMessage({ action: 'OPEN_BACKGROUND_TAB', url: link.href });
-
-        return false;
-    }
-}, true);
-
-
-// === 6. ПОДСВЕТКА (LOOP) ===
-// Обновленные селекторы для Главной страницы и Поиска
-function highlightLoop() {
-    let history = new Set();
-    try {
-        const s = localStorage.getItem('yt_history_ids');
-        if (s) history = new Set(JSON.parse(s));
-    } catch(e){}
-
-    // Селекторы:
-    // a#thumbnail - классика (боковая панель, старая главная)
-    // a.ytd-thumbnail - универсальный
-    // ytd-rich-item-renderer a - главная страница (Grid)
-    // ytd-video-renderer a - поиск
-    const links = document.querySelectorAll('a#thumbnail, a.ytd-thumbnail, a[href^="/watch"]');
-    
-    for (let i = 0; i < links.length; i++) {
-        const link = links[i];
-        if (!link.href) continue;
-        
-        // Фильтруем мусор (ссылки на каналы, плейлисты без видео и т.д.)
-        const vid = getVideoId(link.href);
-        
-        if (vid && history.has(vid)) {
-            // Чтобы не было ложных срабатываний, проверяем, что это действительно тумбнейл видео
-            // Обычно они содержат картинку yt-img-shadow
-            if (link.querySelector('img') || link.id === 'thumbnail') {
-                 if (!link.classList.contains('yt-ext-neon')) link.classList.add('yt-ext-neon');
+    // FORCE PLAY
+    if (msg.action === 'RESUME_PLAYBACK') {
+        const video = document.querySelector('video');
+        if (video) {
+            applyMediaSettings();
+            if (video.paused) {
+                // Пытаемся запустить. Если браузер блокирует - ничего не поделаешь,
+                // но обычно в рамках одной сессии это разрешено.
+                video.play().catch(() => console.log("Autoplay blocked"));
             }
-        } else {
-            if (link.classList.contains('yt-ext-neon')) link.classList.remove('yt-ext-neon');
         }
     }
-    requestAnimationFrame(highlightLoop);
+});
+
+// === 5. HISTORY & HIGHLIGHT ===
+function syncHistory() {
+    chrome.storage.local.get(['openedVideos'], (res) => {
+        CACHE.seenVideos = new Set(res.openedVideos || []);
+        runHighlighter();
+    });
 }
-highlightLoop();
-
-
-// === 7. ИНИЦИАЛИЗАЦИЯ И СООБЩЕНИЯ ===
-
-function initVideo(video) {
-    if (video.dataset.ytExtInit) return;
-    video.dataset.ytExtInit = "true";
-
-    // При старте применяем скорость
-    applySpeed();
-
-    // Листенер конца
-    video.addEventListener('ended', () => {
-        if (!location.search.includes('list=')) {
-            chrome.runtime.sendMessage({ action: 'VIDEO_ENDED' });
+function addToHistory(vid) {
+    if (!vid) return;
+    CACHE.seenVideos.add(vid);
+    runHighlighter();
+    chrome.storage.local.get(['openedVideos'], (res) => {
+        let list = res.openedVideos || [];
+        list = list.filter(id => id !== vid);
+        list.push(vid);
+        if (list.length > 1000) list = list.slice(-1000);
+        chrome.storage.local.set({ openedVideos: list });
+    });
+}
+function runHighlighter() {
+    const links = document.querySelectorAll('a[href^="/watch?v="]');
+    links.forEach(link => {
+        const vid = getVideoId(link.href);
+        if (vid && CACHE.seenVideos.has(vid)) {
+            const target = link.closest('ytd-thumbnail') || link;
+            if (!target.classList.contains('yt-ext-neon')) target.classList.add('yt-ext-neon');
         }
     });
 }
 
-// SPA Навигация
-const observer = new MutationObserver(() => {
-    const video = document.querySelector('video');
-    if (video) {
-        initVideo(video);
-    }
-});
-observer.observe(document.documentElement, { childList: true, subtree: true });
-
-chrome.runtime.onMessage.addListener((msg) => {
-    // 1. Активация вкладки (информирование о скорости)
-    if (msg.action === 'syncPlayAndSpeed') {
+// === 6. INPUT & CLICK ===
+function handleHotkeys(e) {
+    if (['INPUT', 'TEXTAREA', 'DIV'].includes(e.target.tagName) && e.target.isContentEditable) return;
+    if (e.shiftKey && (e.code === 'Period' || e.code === 'Comma')) {
         const video = document.querySelector('video');
-        if (video) {
-            applySpeed(); // Проверка на всякий случай
-            if (video.paused) video.play().catch(()=>{});
-            showToast(`${video.playbackRate.toFixed(2)}x`);
-        }
+        if (!video) return;
+        e.preventDefault(); e.stopPropagation();
+        
+        let newRate = video.playbackRate + (e.code === 'Period' ? CONFIG.step : -CONFIG.step);
+        newRate = Math.min(Math.max(newRate, CONFIG.minSpeed), CONFIG.maxSpeed);
+        newRate = Math.round(newRate * 100) / 100;
+        
+        applyMediaSettings(newRate);
     }
+}
 
-    // 2. Глобальное обновление
-    if (msg.action === 'updateGlobalConfig') {
-        CACHE.global = msg.newSpeed;
-        // Если для текущего видео нет ручной настройки - обновляем
-        const vid = getVideoId(location.href);
-        if (vid && !CACHE.manualSpeeds.has(vid)) {
-            applySpeed();
-            showToast(`Global: ${CACHE.global}x`);
+function setupClickTrap() {
+    document.addEventListener('click', (e) => {
+        const link = e.target.closest('a[href*="/watch?v="]');
+        if (link && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+            if (link.href === location.href) return;
+            e.preventDefault(); e.stopImmediatePropagation();
+            
+            showToast(">>> Background");
+            addToHistory(getVideoId(link.href));
+            chrome.runtime.sendMessage({ action: "OPEN_BACKGROUND", url: link.href });
         }
-    }
+    }, true);
+}
 
-    // 3. Сброс (Reset Button)
-    if (msg.action === 'resetToGlobal') {
-        const vid = getVideoId(location.href);
-        if (vid) {
-            CACHE.manualSpeeds.delete(vid); // Удаляем ручную настройку
-            applySpeed(); // Применится глобальная
-            showToast(`Reset to ${CACHE.global}x`);
-        }
-    }
-    
-    if (msg.action === 'pauseVideo') {
-        const video = document.querySelector('video');
-        if (video && !video.paused) video.pause();
-    }
-});
+// === 7. INIT ===
+function init() {
+    injectStyles();
+    syncHistory();
+    const vid = getVideoId(location.href);
+    if (vid) addToHistory(vid);
+
+    chrome.storage.local.get(['preferredSpeed', 'globalVolume'], (res) => {
+        if (res.preferredSpeed) CACHE.globalSpeed = parseFloat(res.preferredSpeed);
+        if (res.globalVolume !== undefined) CACHE.globalVolume = parseInt(res.globalVolume);
+        initVideoHandler();
+    });
+
+    window.addEventListener('keydown', handleHotkeys, true);
+    setupClickTrap();
+
+    const observer = new MutationObserver(() => {
+        initVideoHandler();
+        const newVid = getVideoId(location.href);
+        if (newVid && !CACHE.seenVideos.has(newVid)) addToHistory(newVid);
+        
+        if (CACHE.observerTimeout) clearTimeout(CACHE.observerTimeout);
+        CACHE.observerTimeout = setTimeout(runHighlighter, CONFIG.debounceTime);
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    setTimeout(runHighlighter, 1000);
+}
+
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+else init();

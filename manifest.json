@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "YouTube Aggressive Manager",
-  "version": "5.0",
+  "version": "5.1",
   "description": "Auto-group, background open, persistent speed 1.5x, auto-close.",
   "permissions": [
     "tabs",
