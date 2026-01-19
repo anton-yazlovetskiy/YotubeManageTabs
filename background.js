@@ -1,6 +1,6 @@
 /**
  * YouTube Aggressive Manager - Background Script
- * Версия: 7.1 (Background Play & Reset Fix)
+ * Версия: 7.2 (Fix: Playlists & Background Play)
  */
 
 const GROUP_TITLE = "YouTube Tabs";
@@ -8,7 +8,8 @@ const GROUP_COLOR = "green";
 
 let tabGroupsMap = {};
 
-// === 1. FOCUS GUARD ===
+// === 1. FOCUS GUARD (ЗАЩИТНИК ФОКУСА) ===
+// Срабатывает при закрытии вкладки
 chrome.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
     const knownGroupId = tabGroupsMap[tabId];
     delete tabGroupsMap[tabId];
@@ -19,10 +20,14 @@ chrome.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
         try {
             const tabsInGroup = await chrome.tabs.query({ groupId: knownGroupId });
             if (tabsInGroup.length > 0) {
+                // Берем последнюю вкладку
                 const targetTab = tabsInGroup[tabsInGroup.length - 1];
+                
+                // 1. АКТИВИРУЕМ
                 await chrome.tabs.update(targetTab.id, { active: true });
-                // ВАЖНО: Если браузер не в фокусе, onActivated может не сработать.
-                // Принудительно запускаем видео здесь:
+                
+                // 2. БУДИМ (HAMMER METHOD)
+                // Шлем сигналы, даже если браузер в фоне
                 forceResume(targetTab.id);
             }
         } catch (e) { console.error("Focus Guard error:", e); }
@@ -35,6 +40,7 @@ chrome.tabs.onUpdated.addListener((tabId, change, tab) => {
 
 // === 2. MESSAGING ===
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    // OPEN BACKGROUND
     if (msg.action === 'OPEN_BACKGROUND' && msg.url) {
         chrome.tabs.create({ url: msg.url, active: false }, async (newTab) => {
             const sourceTab = sender.tab;
@@ -62,26 +68,24 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return;
     }
 
+    // VIDEO ENDED (Только если это не плейлист - фильтр в content.js)
     if (msg.action === 'VIDEO_ENDED' && sender.tab) {
-        // Удаляем вкладку -> сработает onRemoved -> сработает Focus Guard -> сработает forceResume
+        // Просто удаляем вкладку. Остальное сделает Focus Guard (см. выше)
         chrome.tabs.remove(sender.tab.id); 
     }
 });
 
-// === 3. LOGIC: FORCE RESUME ===
-// Функция для агрессивного запуска видео, даже если вкладка в фоне/без фокуса
+// === 3. FORCE RESUME (The Hammer) ===
 function forceResume(tabId) {
-    // Посылаем сразу
-    chrome.tabs.sendMessage(tabId, { action: "RESUME_PLAYBACK" }).catch(()=>{});
+    // Посылаем серию сигналов, чтобы пробить троттлинг браузера
+    const send = () => chrome.tabs.sendMessage(tabId, { action: "RESUME_PLAYBACK" }).catch(()=>{});
     
-    // И еще раз через 500мс для надежности (если вкладка подгружается)
-    setTimeout(() => {
-        chrome.tabs.sendMessage(tabId, { action: "RESUME_PLAYBACK" }).catch(()=>{});
-    }, 500);
+    send(); // Сразу
+    setTimeout(send, 500);  // Через полсекунды
+    setTimeout(send, 1500); // Контрольный
 }
 
-
-// === 4. ACTIVATION LOGIC (СОРТИРОВКА + PAUSE + RESUME) ===
+// === 4. ACTIVATION LOGIC ===
 chrome.tabs.onActivated.addListener(async (activeInfo) => {
     try {
         const tab = await chrome.tabs.get(activeInfo.tabId);
@@ -105,7 +109,7 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
             });
         });
 
-        // C. GROUPING & SORTING
+        // C. SORTING
         const groups = await chrome.tabGroups.query({ windowId: tab.windowId, title: GROUP_TITLE });
         let groupId = (groups.length > 0) ? groups[0].id : null;
 

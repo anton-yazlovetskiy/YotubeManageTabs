@@ -1,6 +1,6 @@
 /**
  * YouTube Aggressive Manager - Content Script
- * Версия: 7.1 (Reset Support)
+ * Версия: 7.2 (Playlist Fix & Reset)
  */
 
 const CONFIG = {
@@ -102,7 +102,17 @@ function initVideoHandler() {
         video.dataset.ytExtInitialized = "true";
         video.addEventListener('loadedmetadata', () => applyMediaSettings());
         applyMediaSettings();
+        
+        // --- PLAYLIST LOGIC FIX ---
         video.addEventListener('ended', () => {
+            // Если это плейлист (есть параметр list), НЕ закрываем вкладку.
+            const urlParams = new URLSearchParams(window.location.search);
+            if (urlParams.has('list')) {
+                console.log("Playlist detected, keeping tab open.");
+                return;
+            }
+            
+            // Если обычное видео - закрываем
             chrome.runtime.sendMessage({ action: "VIDEO_ENDED" });
         });
     }
@@ -119,9 +129,9 @@ chrome.runtime.onMessage.addListener((msg) => {
         CACHE.globalVolume = msg.newVolume;
         applyMediaSettings();
     }
-    // RESTORED RESET
+    // RESET HANDLER
     if (msg.action === 'resetToGlobal') {
-        CACHE.globalSpeed = msg.speed; // Обновляем локальный кэш
+        CACHE.globalSpeed = msg.speed;
         const video = document.querySelector('video');
         if (video) {
             video.playbackRate = msg.speed;
@@ -134,9 +144,7 @@ chrome.runtime.onMessage.addListener((msg) => {
         if (video) {
             applyMediaSettings();
             if (video.paused) {
-                // Пытаемся запустить. Если браузер блокирует - ничего не поделаешь,
-                // но обычно в рамках одной сессии это разрешено.
-                video.play().catch(() => console.log("Autoplay blocked"));
+                video.play().catch(() => console.log("Autoplay blocked/throttled"));
             }
         }
     }
