@@ -18,6 +18,7 @@ function update(delta) {
         let current = parseFloat(res.preferredSpeed || 1.5);
         let next = current + delta;
         
+        // ЛИМИТЫ 0.25 - 3.0
         if (next < 0.25) next = 0.25;
         if (next > 3.0) next = 3.0;
         
@@ -35,7 +36,7 @@ function update(delta) {
     });
 }
 
-// КНОПКА СБРОСА
+// Кнопка сброса
 document.getElementById('resetBtn').onclick = () => {
     chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
         if (tabs[0]) {
