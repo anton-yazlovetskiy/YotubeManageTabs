@@ -83,21 +83,59 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return;
     }
 
-    // VIDEO ENDED (Только если это не плейлист - фильтр в content.js)
+    // VIDEO ENDED - переход на соседнюю вкладку
     if (msg.action === 'VIDEO_ENDED' && sender.tab) {
-        // Просто удаляем вкладку. Остальное сделает Focus Guard (см. выше)
-        chrome.tabs.remove(sender.tab.id); 
+        const closingTabId = sender.tab.id;
+        const groupId = sender.tab.groupId;
+
+        if (groupId !== -1) {
+            chrome.tabs.query({ groupId: groupId }, (tabs) => {
+                const currentIndex = tabs.findIndex(t => t.id === closingTabId);
+                
+                if (tabs.length > 1) {
+                    // Выбираем соседа слева, если нет - справа
+                    const targetIndex = currentIndex > 0 ? currentIndex - 1 : currentIndex + 1;
+                    const targetTab = tabs[targetIndex];
+
+                    if (targetTab) {
+                        // Активируем сначала соседа
+                        chrome.tabs.update(targetTab.id, { active: true }, () => {
+                            // Пробуем запустить видео
+                            forceResume(targetTab.id);
+                            // Удаляем старую вкладку чуть позже для плавности
+                            setTimeout(() => {
+                                chrome.tabs.remove(closingTabId).catch(() => {});
+                            }, 500);
+                        });
+                        return;
+                    }
+                }
+                chrome.tabs.remove(closingTabId).catch(() => {});
+            });
+        } else {
+            chrome.tabs.remove(closingTabId).catch(() => {});
+        }
     }
 });
 
 // === 3. FORCE RESUME (The Hammer) ===
 function forceResume(tabId) {
-    // Посылаем серию сигналов, чтобы пробить троттлинг браузера
-    const send = () => chrome.tabs.sendMessage(tabId, { action: "RESUME_PLAYBACK" }).catch(()=>{});
-    
-    send(); // Сразу
-    setTimeout(send, 500);  // Через полсекунды
-    setTimeout(send, 1500); // Контрольный
+    const run = () => {
+        // Метод 1: Сообщение в контент-скрипт
+        chrome.tabs.sendMessage(tabId, { action: "RESUME_PLAYBACK" }).catch(() => {
+            // Метод 2: Если скрипт не отвечает, внедряем напрямую
+            chrome.scripting.executeScript({
+                target: { tabId: tabId },
+                func: () => {
+                    const v = document.querySelector('video');
+                    if (v && v.paused) v.play().catch(() => {});
+                }
+            }).catch(() => {});
+        });
+    };
+
+    run(); // Сразу
+    setTimeout(run, 2000); // Повтор через 2 сек для фонового режима
 }
 
 // === 4. ACTIVATION LOGIC ===

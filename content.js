@@ -117,8 +117,13 @@ function initVideoHandler() {
             
             // 2. Закрываем вкладку с небольшой задержкой (чтобы звук прозвучал)
             setTimeout(() => {
-                chrome.runtime.sendMessage({ action: "VIDEO_ENDED" });
-            }, 700);
+                // ПРОВЕРКА: Если расширение обновилось или контекст потерян, chrome.runtime будет undefined
+                if (chrome.runtime && chrome.runtime.id) {
+                    chrome.runtime.sendMessage({ action: "VIDEO_ENDED" }).catch(() => {
+                        console.log("Context invalidated, message not sent");
+                    });
+                }
+            }, 800);
         });
     }
 }
@@ -218,30 +223,32 @@ function setupClickTrap() {
 // Функция для создания приятного "динь" (две ноты)
 function playCompletionSound() {
     try {
-        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContextClass) return;
+
+        const audioCtx = new AudioContextClass();
         
+        if (audioCtx.state === 'suspended') {
+            audioCtx.resume().catch(() => {});
+        }
+
         const playNote = (freq, startTime, duration) => {
             const osc = audioCtx.createOscillator();
             const gain = audioCtx.createGain();
-            
             osc.type = 'sine';
             osc.frequency.setValueAtTime(freq, startTime);
-            
             gain.gain.setValueAtTime(0.1, startTime);
             gain.gain.exponentialRampToValueAtTime(0.0001, startTime + duration);
-            
             osc.connect(gain);
             gain.connect(audioCtx.destination);
-            
             osc.start(startTime);
             osc.stop(startTime + duration);
         };
 
-        // Две гармоничные ноты (Ми и Ля)
         playNote(659.25, audioCtx.currentTime, 0.5); 
         playNote(880.00, audioCtx.currentTime + 0.1, 0.4);
     } catch (e) {
-        console.error("Audio playback failed:", e);
+        console.warn("Sound blocked by browser policy");
     }
 }
 
