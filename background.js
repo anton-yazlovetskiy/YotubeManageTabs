@@ -1,6 +1,6 @@
 /**
  * YouTube Aggressive Manager - Background Script
- * Версия: 7.2 (Fix: Playlists & Background Play)
+ * Версия: 7.3 (Fix: Decoupled Volume, No-Loop Resume, Manual Override)
  */
 
 const GROUP_TITLE = "YouTube Tabs";
@@ -9,7 +9,6 @@ const GROUP_COLOR = "green";
 let tabGroupsMap = {};
 
 // === 1. FOCUS GUARD (ЗАЩИТНИК ФОКУСА)
-// Срабатывает при закрытии вкладки
 chrome.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
     const knownGroupId = tabGroupsMap[tabId];
     delete tabGroupsMap[tabId];
@@ -18,32 +17,20 @@ chrome.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
 
     if (knownGroupId && knownGroupId !== -1) {
         try {
-            // 1. Проверяем, остались ли вкладки в группе
             const tabsInGroup = await chrome.tabs.query({ groupId: knownGroupId });
             
             if (tabsInGroup.length > 0) {
-                // ИНТЕГРАЦИЯ v5.4: Проверка текущего фокуса
-                // Получаем текущую активную вкладку в этом окне
                 const currentTab = await chrome.tabs.query({ active: true, currentWindow: true });
                 
-                // ЛОГИКА: Если активная вкладка "вылетела" из нашей группы (или её нет),
-                // ТОЛЬКО ТОГДА мы вмешиваемся и возвращаем фокус.
                 if (!currentTab[0] || currentTab[0].groupId !== knownGroupId) {
-                    
-                    // Берем последнюю вкладку (как самую свежую)
                     const targetTab = tabsInGroup[tabsInGroup.length - 1];
-                    
-                    // АКТИВИРУЕМ
                     await chrome.tabs.update(targetTab.id, { active: true });
                     
-                    // БУДИМ (HAMMER METHOD из v7.2)
-                    // Вызываем только если пришлось принудительно переключать
+                    // БУДИМ (Один раз, без цикла)
                     if (typeof forceResume === 'function') {
                         forceResume(targetTab.id);
                     }
                 } 
-                // ELSE: Если фокус уже на вкладке нашей группы (Chrome сам переключил),
-                // мы ничего не делаем, чтобы не сбивать нативный процесс.
             }
         } catch (e) { console.error("Focus Guard error:", e); }
     }
@@ -83,7 +70,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return;
     }
 
-    // VIDEO ENDED - переход на соседнюю вкладку
+    // VIDEO ENDED
     if (msg.action === 'VIDEO_ENDED' && sender.tab) {
         const closingTabId = sender.tab.id;
         const groupId = sender.tab.groupId;
@@ -93,16 +80,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                 const currentIndex = tabs.findIndex(t => t.id === closingTabId);
                 
                 if (tabs.length > 1) {
-                    // Выбираем соседа слева, если нет - справа
                     const targetIndex = currentIndex > 0 ? currentIndex - 1 : currentIndex + 1;
                     const targetTab = tabs[targetIndex];
 
                     if (targetTab) {
-                        // Активируем сначала соседа
                         chrome.tabs.update(targetTab.id, { active: true }, () => {
-                            // Пробуем запустить видео
                             forceResume(targetTab.id);
-                            // Удаляем старую вкладку чуть позже для плавности
                             setTimeout(() => {
                                 chrome.tabs.remove(closingTabId).catch(() => {});
                             }, 500);
@@ -118,12 +101,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
 });
 
-// === 3. FORCE RESUME (The Hammer) ===
+// === 3. FORCE RESUME (The Hammer - Fixed) ===
 function forceResume(tabId) {
+    // FIX: Убран setTimeout (цикл), который мешал паузе.
+    // Теперь это просто "Толчок" для запуска.
     const run = () => {
-        // Метод 1: Сообщение в контент-скрипт
         chrome.tabs.sendMessage(tabId, { action: "RESUME_PLAYBACK" }).catch(() => {
-            // Метод 2: Если скрипт не отвечает, внедряем напрямую
             chrome.scripting.executeScript({
                 target: { tabId: tabId },
                 func: () => {
@@ -133,25 +116,19 @@ function forceResume(tabId) {
             }).catch(() => {});
         });
     };
-
-    run(); // Сразу
-    setTimeout(run, 2000); // Повтор через 2 сек для фонового режима
+    run(); 
 }
 
 // === 4. ACTIVATION LOGIC ===
 chrome.tabs.onActivated.addListener(async (activeInfo) => {
     try {
         const tab = await chrome.tabs.get(activeInfo.tabId);
-        if (!tab.url || !tab.url.includes("youtube.com/watch")) {
-            // ВАЖНО: Отправляем команду на возобновление воспроизведения
-            chrome.tabs.sendMessage(tab.id, { action: "RESUME_PLAYBACK" }).catch(()=>{});
-            return;
-        };
+        // FIX: Убрана принудительная отправка RESUME_PLAYBACK при каждой активации.
+        // Это позволяло видео перезапускаться, если пользователь поставил паузу и переключил вкладку.
 
-        // A. RESUME
-        forceResume(tab.id);
+        if (!tab.url || !tab.url.includes("youtube.com/watch")) return;
 
-        // B. PAUSE OTHERS
+        // B. PAUSE OTHERS (Оставляем только глушение остальных)
         chrome.tabs.query({ url: "*://www.youtube.com/*" }, (allTabs) => {
             allTabs.forEach(t => {
                 if (t.id !== tab.id && t.audible) {
@@ -166,7 +143,7 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
             });
         });
 
-        // C. SORTING
+        // C. SORTING & GROUPING
         const groups = await chrome.tabGroups.query({ windowId: tab.windowId, title: GROUP_TITLE });
         let groupId = (groups.length > 0) ? groups[0].id : null;
 

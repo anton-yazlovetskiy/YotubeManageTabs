@@ -1,6 +1,6 @@
 /**
  * YouTube Aggressive Manager - Content Script
- * Версия: 7.2 (Playlist Fix & Reset)
+ * Версия: 7.3 (Decoupled & Manual Override)
  */
 
 const CONFIG = {
@@ -15,6 +15,13 @@ let CACHE = {
     globalVolume: 100,
     seenVideos: new Set(),
     observerTimeout: null
+};
+
+// State flags для отслеживания ручного вмешательства
+let STATE = {
+    isProgrammaticChange: false, // Флаг: изменение вызвано скриптом
+    manualSpeed: false,          // Флаг: пользователь изменил скорость
+    manualVolume: false          // Флаг: пользователь изменил громкость
 };
 
 // === 1. STYLES ===
@@ -81,47 +88,74 @@ function applyMediaSettings(targetSpeed = null) {
     const video = document.querySelector('video');
     if (!video) return;
 
-    // Speed
+    STATE.isProgrammaticChange = true; // Начало программного изменения
+
+    // --- 1. Speed Logic ---
+    // Если передана конкретная скорость (например, хоткей), применяем и обновляем тост
     if (targetSpeed !== null) {
         video.playbackRate = targetSpeed;
+        STATE.manualSpeed = true; // Хоткей считается ручным изменением для этого видео
         showToast(`${targetSpeed.toFixed(2)}x`);
-    } else if (Math.abs(video.playbackRate - CACHE.globalSpeed) > 0.1) {
-        video.playbackRate = CACHE.globalSpeed;
+    } 
+    // Иначе применяем глобальную, ТОЛЬКО если пользователь не менял её вручную
+    else if (!STATE.manualSpeed) {
+        if (Math.abs(video.playbackRate - CACHE.globalSpeed) > 0.1) {
+            video.playbackRate = CACHE.globalSpeed;
+        }
     }
 
-    // Volume
-    const targetVol = CACHE.globalVolume / 100;
-    if (Math.abs(video.volume - targetVol) > 0.05) {
-        video.volume = targetVol;
+    // --- 2. Volume Logic (Decoupled) ---
+    // Применяем глобальную громкость, ТОЛЬКО если пользователь не менял её вручную
+    if (!STATE.manualVolume) {
+        const targetVol = CACHE.globalVolume / 100;
+        if (Math.abs(video.volume - targetVol) > 0.05) {
+            video.volume = targetVol;
+        }
     }
+
+    STATE.isProgrammaticChange = false; // Конец программного изменения
 }
 
 function initVideoHandler() {
     const video = document.querySelector('video');
     if (video && !video.dataset.ytExtInitialized) {
         video.dataset.ytExtInitialized = "true";
+        
+        // Сброс флагов для нового видео
+        STATE.manualSpeed = false;
+        STATE.manualVolume = false;
+
+        // Слушатель метаданных (первичная настройка)
         video.addEventListener('loadedmetadata', () => applyMediaSettings());
+        
+        // === DETECT MANUAL CHANGES ===
+        video.addEventListener('ratechange', () => {
+            if (!STATE.isProgrammaticChange) {
+                // Если изменение произошло не из applyMediaSettings -> это пользователь
+                STATE.manualSpeed = true;
+            }
+        });
+
+        video.addEventListener('volumechange', () => {
+            if (!STATE.isProgrammaticChange) {
+                STATE.manualVolume = true;
+            }
+        });
+
+        // Попытка применить сразу, если метаданные уже есть
         applyMediaSettings();
         
         // --- PLAYLIST LOGIC FIX ---
         video.addEventListener('ended', () => {
-            // Если это плейлист (есть параметр list), НЕ закрываем вкладку.
             const urlParams = new URLSearchParams(window.location.search);
             if (urlParams.has('list')) {
                 console.log("Playlist detected, keeping tab open.");
                 return;
             }
-            
-            // 1. Проигрываем звук
             playCompletionSound();
-            
-            // 2. Закрываем вкладку с небольшой задержкой (чтобы звук прозвучал)
             setTimeout(() => {
-                // ПРОВЕРКА: Если расширение обновилось или контекст потерян, chrome.runtime будет undefined
                 if (chrome.runtime && chrome.runtime.id) {
-                    chrome.runtime.sendMessage({ action: "VIDEO_ENDED" }).catch(() => {
-                        console.log("Context invalidated, message not sent");
-                    });
+                    chrome.runtime.sendMessage({ action: "VIDEO_ENDED" }).catch(() => {});
                 }
             }, 800);
         });
@@ -130,25 +164,45 @@ function initVideoHandler() {
 
 // === 4. MESSAGING ===
 chrome.runtime.onMessage.addListener((msg) => {
+    // Обновление глобальных настроек из попапа обновляет текущее видео,
+    // если пользователь не переопределил их вручную.
     if (msg.action === 'updateGlobalConfig') {
         CACHE.globalSpeed = msg.newSpeed;
-        applyMediaSettings();
-        showToast(`Speed: ${msg.newSpeed}x`);
+        // Если меняем через попап, мы хотим применить это к видео,
+        // даже если до этого что-то меняли (сброс флага manualSpeed опционален, 
+        // но логичнее просто попытаться применить, если флаг не стоит.
+        // Или, если пользователь меняет глобально, мы сбрасываем ручной флаг?)
+        // По ТЗ: "Если звук или скорость были изменены пользователем... настройки более не применяются".
+        // Значит, не трогаем STATE.manualSpeed. Если уже менял сам - глобалка игнорируется.
+        applyMediaSettings(); 
+        if (!STATE.manualSpeed) showToast(`Speed: ${msg.newSpeed}x`);
     }
     if (msg.action === 'updateGlobalVolume') {
         CACHE.globalVolume = msg.newVolume;
         applyMediaSettings();
     }
-    // RESET HANDLER
+    
+    // FORCE RESET (Кнопка Reset в попапе)
     if (msg.action === 'resetToGlobal') {
         CACHE.globalSpeed = msg.speed;
+        // Принудительный сброс ручных флагов
+        STATE.manualSpeed = false;
+        STATE.manualVolume = false;
+        
         const video = document.querySelector('video');
         if (video) {
+            // Принудительно ставим скорость
+            STATE.isProgrammaticChange = true;
             video.playbackRate = msg.speed;
+            STATE.isProgrammaticChange = false;
+            
             showToast(`Reset: ${msg.speed}x`);
+            applyMediaSettings(); // Применит и громкость тоже
         }
     }
-    // FORCE PLAY
+
+    // FORCE PLAY (Только если не manual pause? Или просто play?)
+    // Т.к. мы убрали цикл в background, этот вызов придет только 1 раз при открытии.
     if (msg.action === 'RESUME_PLAYBACK') {
         const video = document.querySelector('video');
         if (video) {
@@ -202,6 +256,7 @@ function handleHotkeys(e) {
         newRate = Math.min(Math.max(newRate, CONFIG.minSpeed), CONFIG.maxSpeed);
         newRate = Math.round(newRate * 100) / 100;
         
+        // Передаем targetSpeed -> это выставит manualSpeed = true
         applyMediaSettings(newRate);
     }
 }
@@ -220,17 +275,13 @@ function setupClickTrap() {
     }, true);
 }
 
-// Функция для создания приятного "динь" (две ноты)
 function playCompletionSound() {
     try {
         const AudioContextClass = window.AudioContext || window.webkitAudioContext;
         if (!AudioContextClass) return;
 
         const audioCtx = new AudioContextClass();
-        
-        if (audioCtx.state === 'suspended') {
-            audioCtx.resume().catch(() => {});
-        }
+        if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
 
         const playNote = (freq, startTime, duration) => {
             const osc = audioCtx.createOscillator();
@@ -247,9 +298,7 @@ function playCompletionSound() {
 
         playNote(659.25, audioCtx.currentTime, 0.5); 
         playNote(880.00, audioCtx.currentTime + 0.1, 0.4);
-    } catch (e) {
-        console.warn("Sound blocked by browser policy");
-    }
+    } catch (e) { console.warn("Sound blocked"); }
 }
 
 // === 7. INIT ===
